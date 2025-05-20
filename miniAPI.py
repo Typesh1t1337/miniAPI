@@ -2,8 +2,7 @@ import json
 import socket
 from enum import Enum
 from typing import Callable, Optional, Dict, Any
-
-from utils import call_handler
+from utils import call_handler, response_logger
 
 HOST = "localhost"
 PORT = 8080
@@ -69,6 +68,7 @@ class MiniAPI:
     def __init__(self):
         self.__socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.__routes: Dict[(str, Method), Handler] = {}
+        self.debug: bool = True
 
     def add_route(self, path: str, method: Method, func: Handler) -> None:
         if (path, method) in self.__routes:
@@ -96,6 +96,8 @@ class MiniAPI:
                             "error": f"Method {method_str} not supported",
                         }, ResponseCode.forbidden
                     )
+                    response_logger(path=path, method=method_str, status_code=response.status_code.value,
+                                    reason_phrase=REASON_PHRASES.get(response.status_code))
                     self.__send_response(conn, response)
                     continue
 
@@ -106,22 +108,40 @@ class MiniAPI:
                             "error": f"Not found",
                         }, ResponseCode.not_found
                     )
+                    response_logger(path=path, method=method.value,
+                                    status_code=response.status_code.value,
+                                    reason_phrase=REASON_PHRASES.get(response.status_code))
                     self.__send_response(conn, response)
+                    continue
 
                 request = Request()  # заглушка нужно спарсить payload, params,
 
                 try:
                     response = call_handler(handler, request=request)
+
                     if not isinstance(response, Response):
                         raise TypeError("Handler should return Response")
+
+                    response_logger(path=path, method=method_str,
+                                    status_code=response.status_code.value,
+                                    reason_phrase=REASON_PHRASES.get(response.status_code)
+                                    )
                     self.__send_response(conn, response)
+
                 except Exception:
+                    if self.debug:
+                        raise
+
                     response = Response(
                         {
                             "error": "Internal Server Error",
                         }, ResponseCode.server_error
                     )
+                    response_logger(path=path, method=method.value,
+                                    status_code=response.status_code.value,
+                                    reason_phrase=REASON_PHRASES.get(response.status_code))
                     self.__send_response(conn, response)
+
             except Exception as e:
                 fallback = Response({"error": "Malformed Request", "detail": str(e)}, ResponseCode.bad_request)
                 self.__send_response(conn, fallback)

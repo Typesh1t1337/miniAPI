@@ -1,8 +1,9 @@
 import json
 import socket
 from enum import Enum
-from typing import Callable, Optional, Dict, Any
-from utils import call_handler, response_logger
+from typing import Callable, Optional, Dict, Any, Tuple
+from .utils import call_handler, response_logger, parse_request_body
+from .middleware import BaseMiddleware
 
 HOST = "localhost"
 PORT = 8080
@@ -64,16 +65,49 @@ class Response:
 Handler = Callable[[Optional[Request]], Response]
 
 
-class MiniAPI:
-    def __init__(self):
-        self.__socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.__routes: Dict[(str, Method), Handler] = {}
-        self.debug: bool = True
+class Router:
+    def __init__(self, prefix: str):
+        self.prefix: str = prefix
+        self.__handlers: Dict[Tuple[str, Method], Handler] = {}
+        self.__check_route(prefix=prefix)
 
-    def add_route(self, path: str, method: Method, func: Handler) -> None:
-        if (path, method) in self.__routes:
+    @staticmethod
+    def __check_route(prefix: str):
+        if not prefix.startswith("/") or prefix.endswith("/"):
+            raise KeyError(f"Prefix should start with '/'")  # /api/v1 example
+
+    def add_handler(self, path: str, method: Method, handler: Handler):
+        full_path = self.prefix + path
+        if (full_path, method) in self.__handlers:
+            raise KeyError(f"Duplicate route: {(full_path, method)}")
+
+        self.__handlers[(full_path, method)] = handler
+
+    @property
+    def get_handlers(self):
+        return self.__handlers
+
+
+class MiniAPI:
+    def __init__(self, debug: bool = True):
+        self.__socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.__handlers: Dict[Tuple[str, Method], Handler] = {}
+        self.__middlewares = {}
+        self.debug: bool = debug
+
+    def add_handler(self, path: str, method: Method, handler: Handler) -> None:
+        if (path, method) in self.__handlers:
             raise KeyError(f"Duplicate route: {(path, method)}")
-        self.__routes[(path, method)] = func
+        self.__handlers[(path, method)] = handler
+
+    def add_router(self, router_handlers: Dict[Tuple[str, Method], Handler]) -> None:
+        for (path, method), handler in router_handlers.items():
+            if (path, method) in self.__handlers:
+                raise KeyError(f"Duplicate route: {(path, method)}")
+            self.__handlers[(path, method)] = handler
+
+    def add_middleware(self, middleware: BaseMiddleware) -> None:
+        self.__middlewares[middleware.__name__] = middleware
 
     def run(self):
         self.__socket.bind((HOST, PORT))
@@ -85,10 +119,12 @@ class MiniAPI:
         while True:
             conn, addr = self.__socket.accept()
             try:
-                request_raw = conn.recv(1024).decode("utf-8")
-                method_str, path, _ = request_raw.split("\r\n")[0].split()
+                request_raw = conn.recv(4096).decode("utf-8")
+                method_str, path, body = request_raw.split("\r\n")[0].split()
 
                 method = METHOD_ENUM_COMPARE.get(method_str, None)
+
+                request_lines, headers, body = parse_request_body(request_raw)
 
                 if method is None:
                     response = Response(
@@ -101,8 +137,21 @@ class MiniAPI:
                     self.__send_response(conn, response)
                     continue
 
-                handler = self.__routes.get((path, method))
-                if not callable(handler):
+                handler = self.__handlers.get((path, method), None)
+                if not handler:
+                    available_methods_for_handler = [h for h in Method if (path, h) in self.__handlers]
+                    if available_methods_for_handler and available_methods_for_handler[0].value != method_str:
+                        response = Response(
+                            {
+                                "error": f"Method {method_str} not supported",
+                            }, status_code=ResponseCode.bad_request
+                        )
+                        response_logger(path=path, method=method_str,
+                                        status_code=response.status_code.value,
+                                        reason_phrase=REASON_PHRASES.get(response.status_code))
+                        self.__send_response(conn, response)
+                        continue
+
                     response = Response(
                         {
                             "error": f"Not found",
@@ -114,9 +163,9 @@ class MiniAPI:
                     self.__send_response(conn, response)
                     continue
 
-                request = Request()  # заглушка нужно спарсить payload, params,
-
                 try:
+                    parsed_body = json.loads(body)
+                    request = Request(payload=parsed_body)
                     response = call_handler(handler, request=request)
 
                     if not isinstance(response, Response):
@@ -128,6 +177,18 @@ class MiniAPI:
                                     )
                     self.__send_response(conn, response)
 
+                except json.JSONDecodeError as e:
+                    if self.debug:
+                        raise
+                    response = Response(
+                        {
+                            "error": str(e),
+                        }, ResponseCode.bad_request
+                    )
+
+                    response_logger(path=path, method=method_str, status_code=response.status_code.value,
+                                    reason_phrase=REASON_PHRASES.get(response.status_code)
+                                    )
                 except Exception:
                     if self.debug:
                         raise
@@ -149,5 +210,6 @@ class MiniAPI:
             finally:
                 conn.close()
 
-    def __send_response(self, conn: socket.socket, response: Response):
+    @staticmethod
+    def __send_response(conn: socket.socket, response: Response):
         conn.sendall(response.to_http().encode("utf-8"))

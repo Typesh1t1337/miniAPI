@@ -7,8 +7,9 @@ from typing import Any
 class BaseSerializer:
     def __init__(self, data):
         self.initial_data = data
-        self.validated_data = {}
+        self.__validated_data = {}
         self.errors = {}
+        self.__validation_checked = False
 
         self.declared_fields = self.__get_declared_fields()
         self.__validate()
@@ -21,6 +22,13 @@ class BaseSerializer:
         }
 
         return declared_fields
+
+    @property
+    def data(self):
+        if self.__validation_checked:
+            return self.__validated_data
+        else:
+            raise ValidationError(error="Field is not valid")
 
     def __validate(self):
         for name, field in self.declared_fields.items():
@@ -36,12 +44,16 @@ class BaseSerializer:
 
             try:
                 validated = field.validate(value)
-                self.validated_data[name] = validated
+                self.__validated_data[name] = validated
             except Exception as e:
                 self.errors[name] = str(e)
 
     def is_valid(self):
+        self.__validation_checked = True
         return not self.errors
+
+    def __getattr__(self, name):
+        return f"{name} not exist"
 
 
 class Field:
@@ -128,7 +140,14 @@ class JSONField(Field):
         return value
 
 
+class ValidationError(Exception):
+    def __init__(self, error):
+        self.error = error
+        super().__init__("Validation Error")
+
+
 class UserSerializer(BaseSerializer):
     username = StringField(required=True, default="Lox")
     email = FloatField(required=True)
+
 

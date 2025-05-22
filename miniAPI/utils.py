@@ -24,3 +24,19 @@ def response_logger(path, method, status_code, reason_phrase):
         color = Fore.WHITE
 
     print(f"MiniAPI: {color}{path} {method} {status_code} {reason_phrase}")
+
+
+def parse_request_body(request_body):
+    header_data, _, body = request_body.partition("\r\n\r\n")
+
+    header_lines = header_data.split("\r\n")
+    request_lines = header_lines[0]
+    headers = {
+
+    }
+
+    for line in header_lines[1:]:
+        key, value = line.split(":", 1)
+        headers[key.strip()] = value.strip()
+
+    return request_lines, headers, body
